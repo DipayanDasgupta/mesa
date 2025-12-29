@@ -4,7 +4,6 @@ import copy
 import pickle
 import random
 import re
-import signal
 
 import networkx as nx
 import numpy as np
@@ -1109,19 +1108,5 @@ def test_infinite_loop_on_full_grid():
     # 3. Verify grid is full
     assert len(grid.empties) == 0
 
-    # 4. Attempt to select a random empty cell
-    # Set an alarm to kill the test if it hangs
-    def handler(signum, frame):
-        raise TimeoutError("Test timed out! Infinite loop detected.")
-
-    signal.signal(signal.SIGALRM, handler)
-    signal.alarm(2)  # Set 2 second timeout
-
-    try:
-        with pytest.raises(IndexError):
-            grid.select_random_empty_cell()
-    except TimeoutError:
-        print("FAILURE: The function hung in an infinite loop.")
-        exit(1)
-    finally:
-        signal.alarm(0)  # Disable alarm
+    with pytest.raises(IndexError):
+        grid.select_random_empty_cell()
