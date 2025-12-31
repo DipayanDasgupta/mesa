@@ -17,8 +17,15 @@ from mesa.visualization.components.altair_components import make_altair_space
 from mesa.visualization.components.matplotlib_components import make_mpl_space_component
 
 
-def test_legacy_dict_portrayal_support():
-    """Verify that deprecated dictionary-based portrayals still work."""
+def test_legacy_dict_portrayal_support(mocker):
+    """Verify that deprecated dictionary-based portrayals still work for agents."""
+    # FIX 1: Use spy instead of patch to avoid TypeError during rendering
+    mock_mpl = mocker.spy(
+        mesa.visualization.components.matplotlib_components, "SpaceMatplotlib"
+    )
+    mock_altair = mocker.spy(
+        mesa.visualization.components.altair_components, "SpaceAltair"
+    )
 
     class MockModel(mesa.Model):
         def __init__(self):
@@ -32,16 +39,58 @@ def test_legacy_dict_portrayal_support():
     def agent_portrayal(_):
         return {"marker": "o", "color": "gray"}
 
+    # Test with matplotlib component
     solara.render(
         SolaraViz(model, components=[(make_mpl_space_component(agent_portrayal), 0)])
     )
+    mock_mpl.assert_called()
+
+    # Test with altair component
     solara.render(
         SolaraViz(model, components=[(make_altair_space(agent_portrayal), 0)])
     )
+    mock_altair.assert_called()
 
 
-def test_call_space_drawer(mocker):
-    """Test the legacy space drawer component APIs.
+def test_legacy_property_layer_portrayal(mocker):
+    """Include test for older property layer portrayal here, as requested."""
+    mock_mpl = mocker.spy(
+        mesa.visualization.components.matplotlib_components, "SpaceMatplotlib"
+    )
+
+    class MockModel(mesa.Model):
+        def __init__(self):
+            super().__init__()
+            layer = PropertyLayer("sugar", width=10, height=10, default_value=0)
+            self.grid = MultiGrid(10, 10, True, property_layers=layer)
+            agent = mesa.Agent(self)
+            self.grid.place_agent(agent, (5, 5))
+
+    model = MockModel()
+    property_portrayal = {"sugar": {"colormap": "viridis"}}
+
+    solara.render(
+        SolaraViz(
+            model,
+            components=[
+                (
+                    make_mpl_space_component(
+                        agent_portrayal=None,
+                        propertylayer_portrayal=property_portrayal,
+                    ),
+                    0,
+                )
+            ],
+        )
+    )
+
+    args, _ = mock_mpl.call_args
+    # args are (model, agent_portrayal, propertylayer_portrayal)
+    assert args[2] == property_portrayal
+
+
+def test_call_space_drawer_full(mocker):
+    """Test the legacy space drawer component APIs in full.
 
     This was moved from test_solara_viz.py to preserve coverage
     of the legacy make_mpl_space_component and make_altair_space APIs.

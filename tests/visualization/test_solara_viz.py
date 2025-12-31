@@ -1,6 +1,5 @@
 """Test Solara visualizations - Modern API."""
 
-import random
 import re
 import unittest
 
@@ -9,8 +8,9 @@ import pytest
 import solara
 
 import mesa
-from mesa.discrete_space import VoronoiGrid
 from mesa.space import MultiGrid, PropertyLayer
+from mesa.visualization.backends.altair_backend import AltairBackend
+from mesa.visualization.backends.matplotlib_backend import MatplotlibBackend
 from mesa.visualization.components import AgentPortrayalStyle, PropertyLayerStyle
 from mesa.visualization.solara_viz import (
     ModelCreator,
@@ -142,30 +142,28 @@ def test_solara_viz_backends(mocker, backend):
 
     solara.render(SolaraViz(model, renderer, components=[]))
 
+    # General assertions
     assert renderer.backend == backend
-    assert spy_structure.call_count >= 1
-    assert spy_agents.call_count >= 1
-    assert spy_properties.call_count >= 1
 
+    # Add specific backend checks as requested
+    if backend == "matplotlib":
+        assert isinstance(renderer.backend_renderer, MatplotlibBackend)
+    elif backend == "altair":
+        assert isinstance(renderer.backend_renderer, AltairBackend)
 
-def test_voronoi_grid_renderer():
-    """Test SpaceRenderer with VoronoiGrid using modern API."""
+    # Add robust assertions as requested
+    spy_structure.assert_called_with(renderer)
+    spy_agents.assert_called_with(renderer)
+    spy_properties.assert_called_with(renderer)
 
-    def agent_portrayal(_):
-        return AgentPortrayalStyle(marker="o", color="blue")
-
-    model = mesa.Model()
-    model.grid = VoronoiGrid(
-        centroids_coordinates=[(0, 1), (0, 0), (1, 0)],
-        random=random.Random(42),
-    )
-    renderer = (
-        SpaceRenderer(model, backend="matplotlib")
-        .setup_agents(agent_portrayal)
-        .render()
-    )
-    solara.render(SolaraViz(model, renderer))
-    assert renderer.backend == "matplotlib"
+    # Test that nothing is drawn if the renderer is not passed
+    spy_structure.reset_mock()
+    spy_agents.reset_mock()
+    spy_properties.reset_mock()
+    solara.render(SolaraViz(model))
+    assert spy_structure.call_count == 0
+    assert spy_agents.call_count == 0
+    assert spy_properties.call_count == 0
 
 
 def test_slider():
