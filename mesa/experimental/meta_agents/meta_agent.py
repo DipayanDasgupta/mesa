@@ -39,6 +39,7 @@ as components.
 """
 
 import itertools
+import warnings
 from collections.abc import Callable, Iterable
 from types import MethodType
 from typing import Any
@@ -105,13 +106,11 @@ def find_combinations(
     for candidate_group in itertools.chain.from_iterable(
         itertools.combinations(group, size) for size in range(*size_range)
     ):
-        evaluation_result = evaluate_combination(
+        group_set, result = evaluate_combination(
             candidate_group, model, evaluation_func
         )
-        if evaluation_result is not None:
-            group_set, result = evaluation_result
-            if result:
-                combinations.append((group_set, result))
+        if result:
+            combinations.append((group_set, result))
 
     if len(combinations) > 0 and filter_func:
         filtered_combinations = filter_func(combinations)
@@ -166,9 +165,8 @@ def create_meta_agent(
     Returns:
         - MetaAgent Instance
     """
-    # Convert agents to dict, to ensure uniqueness,
-    # we need a dict, not a set to keep stuff deterministic
-    agents = list(dict.fromkeys(agents).keys())
+    # Convert agents to set to ensure uniqueness
+    agents = set(agents)
 
     # Ensure there is at least one agent base class
     if not mesa_agent_type:
@@ -231,26 +229,26 @@ def create_meta_agent(
                 setattr(meta_agent_instance, key, value)
 
     # Path 1 - Add agents to existing meta-agent
-    constituting_agents = [a for a in agents if hasattr(a, "meta_agent")]
+    constituting_agents = [a for a in agents if len(a.meta_agents) > 0]
     if len(constituting_agents) > 0:
         if len(constituting_agents) == 1:
-            add_attributes(constituting_agents[0].meta_agent, agents, meta_attributes)
-            add_methods(constituting_agents[0].meta_agent, agents, meta_methods)
-            constituting_agents[0].meta_agent.add_constituting_agents(agents)
-
-            return constituting_agents[0].meta_agent  # Return the existing meta-agent
+            # Take the first meta-agent the constituting agent belongs to
+            meta_agent = next(iter(constituting_agents[0].meta_agents))
+            add_attributes(meta_agent, agents, meta_attributes)
+            add_methods(meta_agent, agents, meta_methods)
+            meta_agent.add_agents(agents)
+            return meta_agent
 
         else:
             constituting_agent = model.random.choice(constituting_agents)
-            agents = list(
-                (dict.fromkeys(agents) | dict.fromkeys(constituting_agents)).keys()
-            )
-            add_attributes(constituting_agent.meta_agent, agents, meta_attributes)
-            add_methods(constituting_agent.meta_agent, agents, meta_methods)
-            constituting_agent.meta_agent.add_constituting_agents(agents)
+            meta_agent = next(iter(constituting_agent.meta_agents))
+            new_agents = agents - set(constituting_agents)
+            add_attributes(meta_agent, new_agents, meta_attributes)
+            add_methods(meta_agent, new_agents, meta_methods)
+            meta_agent.add_agents(new_agents)
             # TODO: Add way for user to specify how agents join meta-agent
             # instead of random choice
-            return constituting_agent.meta_agent
+            return meta_agent
 
     else:
         # Path 2 - Create a new instance of an existing meta-agent class
@@ -295,9 +293,9 @@ class MetaAgent(Agent):
         self._constituting_set = AgentSet(agents or [], random=model.random)
         self.name = name
 
-        # Add ref to meta_agent in constituting_agents
+        # Bidirectional reference using meta_agents WeakSet
         for agent in self._constituting_set:
-            agent.meta_agent = self  # TODO: Make a set for meta_agents
+            agent.meta_agents.add(self)
 
     def __len__(self) -> int:
         """Return the number of components."""
@@ -310,6 +308,20 @@ class MetaAgent(Agent):
     def __contains__(self, agent: Agent) -> bool:
         """Check if an agent is a component."""
         return agent in self._constituting_set
+
+    def __getstate__(self):
+        """Handle pickling: convert internal WeakSet -> normal set."""
+        state = self.__dict__.copy()
+        # _constituting_set is a WeakKeyDictionary -> convert values (agents) to strong set
+        state["_constituting_set"] = set(state["_constituting_set"])
+        return state
+
+    def __setstate__(self, state):
+        """Handle unpickling: restore WeakSet from the strong set."""
+        self.__dict__.update(state)
+        # Rebuild WeakKeyDictionary from the unpickled set of agents
+        agents = state["_constituting_set"]
+        self._constituting_set = AgentSet(agents, random=self.model.random)
 
     @property
     def agents(self) -> AgentSet:
@@ -340,7 +352,7 @@ class MetaAgent(Agent):
         """
         return {type(agent) for agent in self._constituting_set}
 
-    def get_constituting_agent_instance(self, agent_type) -> set[type]:
+    def get_constituting_agent_instance(self, agent_type) -> Agent:
         """Get the instance of a constituting_agent of the specified type.
 
         Args:
@@ -359,29 +371,67 @@ class MetaAgent(Agent):
                 f"No constituting_agent of type {agent_type} found."
             ) from None
 
-    def add_constituting_agents(
-        self,
-        new_agents: set[Agent],
-    ):
-        """Add agents as components.
+    def add_agents(self, new_agents: set[Agent]):
+        """Add agents as components (recommended method).
 
         Args:
             new_agents (set[Agent]): The agents to add to MetaAgent constituting_set.
         """
         for agent in new_agents:
             self._constituting_set.add(agent)
-            agent.meta_agent = self  # TODO: Make a set for meta_agents
+            agent.meta_agents.add(self)
+            if agent not in self.model.agents:
+                self.model.register_agent(agent)
 
-    def remove_constituting_agents(self, remove_agents: set[Agent]):
-        """Remove agents as components.
+    def remove_agents(self, remove_agents: set[Agent]):
+        """Remove agents as components (recommended method).
 
         Args:
             remove_agents (set[Agent]): The agents to remove from MetaAgent.
         """
         for agent in remove_agents:
             self._constituting_set.discard(agent)
-            agent.meta_agent = None  # TODO: Remove meta_agent from set
-            self.model.deregister_agent(agent)
+            agent.meta_agents.discard(self)
+            # Note: deregister_agent is usually not called here unless agent has no other purpose
+
+    def add_constituting_agents(
+        self,
+        new_agents: set[Agent],
+    ):
+        """Add agents as components (legacy name - deprecated).
+
+        Use add_agents() instead.
+        """
+        warnings.warn(
+            "add_constituting_agents is deprecated and will be removed in a future version. "
+            "Use add_agents() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        self.add_agents(new_agents)
+
+    def remove_constituting_agents(self, remove_agents: set[Agent]):
+        """Remove agents as components (legacy name - deprecated).
+
+        Use remove_agents() instead.
+        """
+        warnings.warn(
+            "remove_constituting_agents is deprecated and will be removed in a future version. "
+            "Use remove_agents() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        self.remove_agents(remove_agents)
+
+    def remove(self) -> None:
+        """Remove this meta-agent from the model and clean up constituent references."""
+        # Clean bidirectional links
+        for agent in list(self._constituting_set):
+            agent.meta_agents.discard(self)
+        self._constituting_set.clear()
+
+        # Remove self from model/scheduler
+        super().remove()
 
     def step(self):
         """Perform the agent's step.

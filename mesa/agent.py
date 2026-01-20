@@ -23,11 +23,13 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, overload
 import numpy as np
 
 if TYPE_CHECKING:
+    # We ensure that these are not imported during runtime to prevent cyclic
+    # dependency.
     from mesa.model import Model
     from mesa.space import Position
 
 
-class Agent[M: Model]:
+class Agent:
     """Base class for a model agent in Mesa.
 
     Attributes:
@@ -36,19 +38,18 @@ class Agent[M: Model]:
         pos (Position): A reference to the position where this agent is located.
 
     Notes:
-        Agents must be hashable to be used in an AgentSet.
-        In Python 3, defining `__eq__` without `__hash__` makes an object unhashable,
-        which will break AgentSet usage.
-        unique_id is unique relative to a model instance and starts from 1
+          unique_id is unique relative to a model instance and starts from 1
 
     """
 
     # this is a class level attribute
     # it is a dictionary, indexed by model instance
     # so, unique_id is unique relative to a model, and counting starts from 1
-    _ids: ClassVar[defaultdict] = defaultdict(functools.partial(itertools.count, 1))
+    _ids: ClassVar[defaultdict[Model, Iterator[int]]] = defaultdict(
+        functools.partial(itertools.count, 1)
+    )
 
-    def __init__(self, model: M, *args, **kwargs) -> None:
+    def __init__(self, model: Model, *args, **kwargs) -> None:
         """Create a new agent.
 
         Args:
@@ -62,10 +63,55 @@ class Agent[M: Model]:
         """
         super().__init__(*args, **kwargs)
 
-        self.model: M = model
+        self.model: Model = model
         self.unique_id: int = next(self._ids[model])
         self.pos: Position | None = None
+        # Use a WeakSet to store meta-agent memberships to prevent memory leaks
+        self.meta_agents: weakref.WeakSet = weakref.WeakSet()
         self.model.register_agent(self)
+
+    @property
+    def meta_agent(self):
+        """Backwards-compatible property for single meta-agent access.
+
+        Returns one of the meta-agents if the agent belongs to any, or None otherwise.
+        """
+        warnings.warn(
+            "The `meta_agent` property is deprecated and will be removed in a future version. "
+            "Use the `meta_agents` set to manage multiple memberships.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return next(iter(self.meta_agents), None)
+
+    @meta_agent.setter
+    def meta_agent(self, meta_agent_instance):
+        """Backwards-compatible setter for single meta-agent access."""
+        warnings.warn(
+            "Setting `meta_agent` is deprecated. Add the agent to the meta-agent's "
+            "agents directly (e.g., `my_meta_agent.add_agents({agent})`).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        self.meta_agents.clear()
+        if meta_agent_instance is not None:
+            self.meta_agents.add(meta_agent_instance)
+
+    @property
+    def scenario(self):
+        """Reference to the scenario object (if set on the model)."""
+        return getattr(self.model, "scenario", None)
+
+    def __getstate__(self):
+        """Handle pickling: convert internal WeakSet → normal set."""
+        state = self.__dict__.copy()
+        state["meta_agents"] = set(state["meta_agents"])  # Convert to a pickleable set
+        return state
+
+    def __setstate__(self, state):
+        """Handle unpickling, converting the set back to a WeakSet."""
+        self.__dict__.update(state)
+        self.meta_agents = weakref.WeakSet(state["meta_agents"])
 
     def remove(self) -> None:
         """Remove and delete the agent from the model.
@@ -85,9 +131,7 @@ class Agent[M: Model]:
         pass
 
     @classmethod
-    def create_agents[T: Agent](
-        cls: type[T], model: Model, n: int, *args, **kwargs
-    ) -> AgentSet[T]:
+    def create_agents(cls, model: Model, n: int, *args, **kwargs) -> AgentSet[Agent]:
         """Create N agents.
 
         Args:
@@ -102,43 +146,39 @@ class Agent[M: Model]:
             AgentSet containing the agents created.
 
         """
-        agents = []
 
-        if not args and not kwargs:
-            for _ in range(n):
-                agents.append(cls(model))
-            return AgentSet(agents, random=model.random)
+        class ListLike:
+            """Make default arguments act as if they are in a list of length N.
 
-        # Prepare positional argument iterators
-        arg_iters = []
+            This is a helper class.
+            """
+
+            def __init__(self, value):
+                self.value = value
+
+            def __getitem__(self, i):
+                return self.value
+
+        listlike_args = []
         for arg in args:
-            if isinstance(arg, (list, np.ndarray, tuple)) and len(arg) == n:
-                arg_iters.append(arg)
+            if isinstance(arg, (list | np.ndarray | tuple)) and len(arg) == n:
+                listlike_args.append(arg)
             else:
-                arg_iters.append(itertools.repeat(arg, n))
+                listlike_args.append(ListLike(arg))
 
-        # Prepare keyword argument iterators
-        kw_keys = list(kwargs.keys())
-        kw_val_iters = []
-        for v in kwargs.values():
-            if isinstance(v, (list, np.ndarray, tuple)) and len(v) == n:
-                kw_val_iters.append(v)
+        listlike_kwargs = {}
+        for k, v in kwargs.items():
+            if isinstance(v, (list | np.ndarray | tuple)) and len(v) == n:
+                listlike_kwargs[k] = v
             else:
-                kw_val_iters.append(itertools.repeat(v, n))
+                listlike_kwargs[k] = ListLike(v)
 
-        # If arg_iters is empty, zip(*[]) returns nothing, so we use repeat(())
-        pos_iter = zip(*arg_iters) if arg_iters else itertools.repeat(())
-
-        kw_iter = zip(*kw_val_iters) if kw_val_iters else itertools.repeat(())
-
-        # We rely on range(n) to drive the loop length
-        if kwargs:
-            for _, p_args, k_vals in zip(range(n), pos_iter, kw_iter):
-                agents.append(cls(model, *p_args, **dict(zip(kw_keys, k_vals))))
-        else:
-            for _, p_args in zip(range(n), pos_iter):
-                agents.append(cls(model, *p_args))
-
+        agents = []
+        for i in range(n):
+            instance_args = [arg[i] for arg in listlike_args]
+            instance_kwargs = {k: v[i] for k, v in listlike_kwargs.items()}
+            agent = cls(model, *instance_args, **instance_kwargs)
+            agents.append(agent)
         return AgentSet(agents, random=model.random)
 
     @property
@@ -151,13 +191,8 @@ class Agent[M: Model]:
         """Return a seeded np.random rng."""
         return self.model.rng
 
-    @property
-    def scenario(self):
-        """Return the scenario associated with the model."""
-        return self.model.scenario
 
-
-class AgentSet[A: Agent](MutableSet[A], Sequence[A]):
+class AgentSet(MutableSet, Sequence):
     """A collection class that represents an ordered set of agents within an agent-based model (ABM).
 
     This class extends both MutableSet and Sequence, providing set-like functionality with order preservation and
@@ -182,7 +217,7 @@ class AgentSet[A: Agent](MutableSet[A], Sequence[A]):
 
     def __init__(
         self,
-        agents: Iterable[A],
+        agents: Iterable[Agent],
         random: Random | None = None,
     ):
         """Initializes the AgentSet with a collection of agents and a reference to the model.
@@ -211,21 +246,21 @@ class AgentSet[A: Agent](MutableSet[A], Sequence[A]):
         """Return the number of agents in the AgentSet."""
         return len(self._agents)
 
-    def __iter__(self) -> Iterator[A]:
+    def __iter__(self) -> Iterator[Agent]:
         """Provide an iterator over the agents in the AgentSet."""
         return self._agents.keys()
 
-    def __contains__(self, agent: A) -> bool:
+    def __contains__(self, agent: Agent) -> bool:
         """Check if an agent is in the AgentSet. Can be used like `agent in agentset`."""
         return agent in self._agents
 
     def select(
         self,
-        filter_func: Callable[[A], bool] | None = None,
+        filter_func: Callable[[Agent], bool] | None = None,
         at_most: int | float = float("inf"),
         inplace: bool = False,
-        agent_type: type[A] | None = None,
-    ) -> AgentSet[A]:
+        agent_type: type[Agent] | None = None,
+    ) -> AgentSet:
         """Select a subset of agents from the AgentSet based on a filter function and/or quantity limit.
 
         Args:
@@ -267,7 +302,7 @@ class AgentSet[A: Agent](MutableSet[A], Sequence[A]):
 
         return AgentSet(agents, self.random) if not inplace else self._update(agents)
 
-    def shuffle(self, inplace: bool = False) -> AgentSet[A]:
+    def shuffle(self, inplace: bool = False) -> AgentSet:
         """Randomly shuffle the order of agents in the AgentSet.
 
         Args:
@@ -293,10 +328,10 @@ class AgentSet[A: Agent](MutableSet[A], Sequence[A]):
 
     def sort(
         self,
-        key: Callable[[A], Any] | str,
+        key: Callable[[Agent], Any] | str,
         ascending: bool = False,
         inplace: bool = False,
-    ) -> AgentSet[A]:
+    ) -> AgentSet:
         """Sort the agents in the AgentSet based on a specified attribute or custom function.
 
         Args:
@@ -318,7 +353,7 @@ class AgentSet[A: Agent](MutableSet[A], Sequence[A]):
             else self._update(sorted_agents)
         )
 
-    def _update(self, agents: Iterable[A]):
+    def _update(self, agents: Iterable[Agent]):
         """Update the AgentSet with a new set of agents.
 
         This is a private method primarily used internally by other methods like select, shuffle, and sort.
@@ -326,7 +361,7 @@ class AgentSet[A: Agent](MutableSet[A], Sequence[A]):
         self._agents = weakref.WeakKeyDictionary(dict.fromkeys(agents))
         return self
 
-    def do(self, method: str | Callable, *args, **kwargs) -> AgentSet[A]:
+    def do(self, method: str | Callable, *args, **kwargs) -> AgentSet:
         """Invoke a method or function on each agent in the AgentSet.
 
         Args:
@@ -353,7 +388,7 @@ class AgentSet[A: Agent](MutableSet[A], Sequence[A]):
 
         return self
 
-    def shuffle_do(self, method: str | Callable, *args, **kwargs) -> AgentSet[A]:
+    def shuffle_do(self, method: str | Callable, *args, **kwargs) -> AgentSet:
         """Shuffle the agents in the AgentSet and then invoke a method or function on each agent.
 
         It's a fast, optimized version of calling shuffle() followed by do().
@@ -499,7 +534,7 @@ class AgentSet[A: Agent](MutableSet[A], Sequence[A]):
                 "should be one of 'error' or 'default'"
             )
 
-    def set(self, attr_name: str, value: Any) -> AgentSet[A]:
+    def set(self, attr_name: str, value: Any) -> AgentSet:
         """Set a specified attribute to a given value for all agents in the AgentSet.
 
         Args:
@@ -513,13 +548,7 @@ class AgentSet[A: Agent](MutableSet[A], Sequence[A]):
             setattr(agent, attr_name, value)
         return self
 
-    @overload
-    def __getitem__(self, item: int) -> A: ...
-
-    @overload
-    def __getitem__(self, item: slice) -> list[A]: ...
-
-    def __getitem__(self, item):
+    def __getitem__(self, item: int | slice) -> Agent:
         """Retrieve an agent or a slice of agents from the AgentSet.
 
         Args:
@@ -530,7 +559,7 @@ class AgentSet[A: Agent](MutableSet[A], Sequence[A]):
         """
         return list(self._agents.keys())[item]
 
-    def add(self, agent: A):
+    def add(self, agent: Agent):
         """Add an agent to the AgentSet.
 
         Args:
@@ -541,7 +570,7 @@ class AgentSet[A: Agent](MutableSet[A], Sequence[A]):
         """
         self._agents[agent] = None
 
-    def discard(self, agent: A):
+    def discard(self, agent: Agent):
         """Remove an agent from the AgentSet if it exists.
 
         This method does not raise an error if the agent is not present.
@@ -555,7 +584,7 @@ class AgentSet[A: Agent](MutableSet[A], Sequence[A]):
         with contextlib.suppress(KeyError):
             del self._agents[agent]
 
-    def remove(self, agent: A):
+    def remove(self, agent: Agent):
         """Remove an agent from the AgentSet.
 
         This method raises an error if the agent is not present.
