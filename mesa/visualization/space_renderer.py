@@ -398,6 +398,7 @@ class SpaceRenderer:
         """Render the complete space with structure, agents, and property layers.
 
         Args:
+            self: The SpaceRenderer instance.
             agent_portrayal: (Deprecated) Function for agent portrayal. Use setup_agents() instead.
             propertylayer_portrayal: (Deprecated) Function for property layer portrayal. Use setup_propertylayer() instead.
             **kwargs: (Deprecated) Additional keyword arguments.
@@ -413,6 +414,20 @@ class SpaceRenderer:
                 self.agent_portrayal = agent_portrayal
             if propertylayer_portrayal is not None:
                 self.propertylayer_portrayal = propertylayer_portrayal
+
+            # FIX: Handle deprecated kwargs gracefully to prevent crashes.
+            # This loop handles multiple deprecated kwargs in a scalable way.
+            deprecated_kwargs_map = {
+                "space_kwargs": self.draw_space_kwargs,
+                "agent_kwargs": self.draw_agent_kwargs,
+            }
+            for key, target_dict in deprecated_kwargs_map.items():
+                if key in kwargs:
+                    value = kwargs.pop(key)
+                    if isinstance(value, dict):
+                        target_dict.update(value)
+
+            # Update with any remaining kwargs (now that the dangerous ones are removed)
             self.draw_space_kwargs.update(kwargs)
 
         if self.space_mesh is None:
