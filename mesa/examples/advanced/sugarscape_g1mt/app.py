@@ -63,8 +63,7 @@ renderer = (
     .setup_propertylayer(propertylayer_portrayal)
 )
 # Specifically, avoid drawing the grid to hide the grid lines.
-renderer.draw_agents()
-renderer.draw_propertylayer()
+renderer.render()
 
 renderer.post_process = post_process
 

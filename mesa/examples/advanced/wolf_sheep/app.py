@@ -84,7 +84,7 @@ renderer = SpaceRenderer(
     backend="matplotlib",
 ).setup_agents(wolf_sheep_portrayal)
 renderer.post_process = post_process_space
-renderer.draw_agents()
+renderer.render()
 
 page = SolaraViz(
     model,
